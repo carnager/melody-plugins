@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Melody plugin (ADR-0288): an artist's missing albums, from dropwatch.
+
+"missing" says which albums of the chosen artists dropwatch knows are not in
+the library; "open" opens their pages in dropwatch. dropwatch's address is
+DROPWATCH_URL, else http://localhost:8080; its API token (dropwatch's
+settings -> Account) DROPWATCH_TOKEN. Both are read from the environment,
+else from ~/.config/dropwatch/client.env (KEY=value lines).
+"""
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+CLIENT_ENV = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                          "dropwatch", "client.env")
+
+
+def client_env():
+    values = {}
+    try:
+        with open(CLIENT_ENV, encoding="utf-8") as lines:
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return values
+
+
+def setting(key, default=""):
+    return (os.environ.get(key) or client_env().get(key) or default).strip()
+
+
+BASE = setting("DROPWATCH_URL", "http://localhost:8080").rstrip("/")
+TOKEN = setting("DROPWATCH_TOKEN")
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def get(path):
+    request = urllib.request.Request(BASE + path)
+    if TOKEN:
+        request.add_header("Authorization", "Bearer " + TOKEN)
+    try:
+        with urllib.request.urlopen(request, timeout=50) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            fail("dropwatch wants an API token: create one under its settings -> Account "
+                 "and put DROPWATCH_TOKEN=<token> in " + CLIENT_ENV
+                 if not TOKEN else "dropwatch refused the API token in " + CLIENT_ENV)
+        fail("dropwatch at %s: %s" % (BASE, error))
+    except Exception as error:
+        fail("dropwatch at %s: %s" % (BASE, error))
+
+
+def folded(name):
+    return " ".join(name.casefold().split())
+
+
+def chosen_artists(given):
+    names = []
+    for album in given.get("albums") or []:
+        candidates = [album.get("artist") or ""]
+        candidates += [track.get("artist") or "" for track in album.get("tracks") or []]
+        name = next((c for c in candidates if c.strip()), "")
+        if name and folded(name) not in [folded(n) for n in names]:
+            names.append(name)
+    return names
+
+
+def browser(url):
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ("missing", "open"):
+        fail("usage: dropwatch-plugin missing|open")
+    names = chosen_artists(json.load(sys.stdin))
+    if not names:
+        fail("no artist in what was chosen")
+    known = {folded(a.get("name") or ""): a for a in get("/api/artists").get("artists") or []}
+    items = []
+    total = 0
+    for name in names:
+        artist = known.get(folded(name))
+        if artist is None:
+            items.append({"text": name, "detail": "not in dropwatch"})
+            continue
+        page = "%s/#artist/%s" % (BASE, urllib.parse.quote(artist["id"]))
+        if sys.argv[1] == "open":
+            browser(page)
+            continue
+        releases = get("/api/artists/%s/releases?missing=only"
+                       % urllib.parse.quote(artist["id"])).get("releases") or []
+        shown = artist.get("name", name)
+        if not releases:
+            items.append({"text": shown, "detail": "nothing missing", "url": page})
+            continue
+        for release in sorted(releases, key=lambda r: r.get("firstReleaseDate") or ""):
+            total += 1
+            year = (release.get("firstReleaseDate") or "")[:4]
+            detail = " · ".join(p for p in (year, release.get("primaryType") or "") if p)
+            if release.get("mbid"):
+                url = "https://musicbrainz.org/release-group/" + release["mbid"]
+            elif release.get("discogsMasterId"):
+                url = "https://www.discogs.com/master/%s" % release["discogsMasterId"]
+            else:
+                url = page
+            title = release.get("title") or "?"
+            items.append({"text": title if len(names) == 1 else "%s -- %s" % (shown, title),
+                          "detail": detail, "url": url})
+    if sys.argv[1] == "missing":
+        heading = known.get(folded(names[0]), {}).get("name", names[0]) if len(names) == 1 \
+            else "%d artists" % len(names)
+        print(json.dumps({"title": "%s: %d missing" % (heading, total), "items": items}))
+
+if __name__ == "__main__":
+    main()

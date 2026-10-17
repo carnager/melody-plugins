@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "dropwatch",
+  "description": "Which albums of an artist are missing, from your dropwatch",
+  "actions": [
+    {
+      "id": "missing",
+      "label": "Missing albums",
+      "for": "tracks",
+      "run": ["./dropwatch-plugin", "missing"],
+      "result": "list",
+      "timeout": 60
+    },
+    {
+      "id": "open",
+      "label": "Open in dropwatch",
+      "for": "tracks",
+      "run": ["./dropwatch-plugin", "open"],
+      "result": "none",
+      "timeout": 30
+    }
+  ]
+}
